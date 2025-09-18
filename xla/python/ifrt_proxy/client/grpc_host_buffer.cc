@@ -15,14 +15,18 @@
 #include "xla/python/ifrt_proxy/client/grpc_host_buffer.h"
 
 #include <cstdint>
+#include <cstdlib>
+#include <limits>
 #include <memory>
 #include <string>
 #include <utility>
 
+#include "absl/log/check.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/cord.h"
+#include "absl/strings/numbers.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
 #include "grpcpp/client_context.h"
@@ -31,10 +35,15 @@
 #include "grpcpp/support/sync_stream.h"
 #include "xla/pjrt/distributed/util.h"
 #include "xla/python/ifrt/future.h"
+#include "xla/python/ifrt_proxy/client/global_flags.h"
+#include "xla/python/ifrt_proxy/common/env_utils.h"
 #include "xla/python/ifrt_proxy/common/grpc_ifrt_service.grpc.pb.h"
 #include "xla/python/ifrt_proxy/common/grpc_ifrt_service.pb.h"
 #include "xla/python/ifrt_proxy/common/prof_util.h"
+#include "xla/python/ifrt_proxy/common/versions.h"
+#include "xla/tsl/platform/env.h"
 #include "xla/tsl/protobuf/status.pb.h"
+#include "tsl/platform/path.h"
 #include "tsl/platform/unbounded_work_queue.h"
 #include "tsl/profiler/lib/traceme.h"
 
@@ -54,6 +63,41 @@ static void SetDataFromStringView(GrpcHostBufferStoreRequest& req,
 #endif
 }
 
+// Returns the byte-size beyond which transfers are considered large, and so
+// optimizations specific to large transfers should be used.
+// TODO(madthanu): Convert this into a configuration option supplied by
+// global_flags.h.
+static int LargeTransferThreshold() {
+  static int result = []() {
+    const char* key = "IFRT_PROXY_LARGE_TRANSFER_THRESHOLD";
+    if (const char* valptr = std::getenv(key)) {
+      std::string val(valptr);
+      int result;
+      QCHECK(absl::SimpleAtoi(val, &result))
+          << " " << key << ": '" << val << "'";
+      return result;
+    }
+    return std::numeric_limits<int>::max();
+  }();
+  return result;
+}
+
+// Returns the directory to use as a scratchpad for large-transfer
+// optimizations.
+// TODO(madthanu): Convert this into a configuration option supplied by
+// global_flags.h.
+static const std::string& LargeTransferOptimizationDirectory() {
+  static const std::string result = []() {
+    const char* key = "IFRT_PROXY_LARGE_TRANSFER_OPTIMIZATION_DIRECTORY";
+    if (const char* valptr = std::getenv(key)) {
+      return std::string(valptr);
+    }
+    return std::string("");
+  }();
+  return result;
+}
+
+
 GrpcClientHostBufferStore::GrpcClientHostBufferStore(
     std::shared_ptr<grpc::GrpcIfrtService::StubInterface> stub,
     IfrtProxyVersion version, uint64_t session_id)
@@ -69,8 +113,56 @@ GrpcClientHostBufferStore::~GrpcClientHostBufferStore() {
   LOG(INFO) << "Destructed HostBufferStoreLookupsWorkQueue.";
 }
 
+Future<> GrpcClientHostBufferStore::StoreViaFile(uint64_t handle,
+                                                 absl::string_view data) {
+  auto promise = Future<>::CreatePromise();
+  auto future = Future<>(promise);
+
+  XFlowHelper flow("GrpcClientHostBufferStore::StoreViaFile");
+  flow.InstantActivity<XFlowHelper::kSend>();
+
+  work_queue_->Schedule([this, handle, promise,
+                         data, flow]() mutable -> void {
+    auto span = flow.Span<XFlowHelper::kRecv>();
+
+    GrpcHostBufferStoreViaFileRequest request;
+    request.mutable_metadata()->set_session_id(session_id_);
+    request.mutable_metadata()->set_handle(handle);
+    request.mutable_metadata()->set_buffer_size(data.size());
+    VLOG(3) << "GrpcClientHostBufferStore::StoreViaFile start "
+            << request.ShortDebugString();
+
+    std::string out_path = ProcessedFilePath(tsl::io::JoinPath(
+        LargeTransferOptimizationDirectory(), absl::StrCat("lt_", handle)));
+    CHECK_OK(tsl::WriteStringToFile(tsl::Env::Default(), out_path, data))
+        << "HostBufferStore::StoreViaFile failed.";
+
+    ::grpc::ClientContext context;
+    GrpcHostBufferStoreViaFileResponse response;
+    promise.Set(xla::FromGrpcStatus(
+        stub_->HostBufferStoreViaFile(&context, request, &response)));
+    VLOG(3) << "GrpcClientHostBufferStore::StoreViaFile done "
+            << request.ShortDebugString();
+  });
+  return future;
+}
+
 Future<> GrpcClientHostBufferStore::Store(uint64_t handle,
                                           absl::string_view data) {
+  // Attempt large transfer optimization.
+  {
+    LOG_FIRST_N(INFO, 1) << "GrpcClientHostBufferStore large transfer "
+                         << "optimization configured for threshold="
+                         << LargeTransferThreshold() << " and dir='"
+                         << LargeTransferOptimizationDirectory() << "'";
+    if (version_.protocol_version() >=
+            protocol_version::
+                kGrpcAllowLargeTransferOptimizationViaSharedDirectory &&
+        data.size() > LargeTransferThreshold()) {
+      return StoreViaFile(handle, data);
+    }
+  }
+
   auto promise = Future<>::CreatePromise();
 
   XFlowHelper flow("GrpcClientHostBufferStore::StoreAsync");

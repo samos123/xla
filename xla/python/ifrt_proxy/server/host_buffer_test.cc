@@ -21,6 +21,8 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include "absl/status/status.h"
+#include "absl/status/status_matchers.h"
+#include "absl/strings/string_view.h"
 #include "absl/synchronization/notification.h"
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
@@ -54,9 +56,8 @@ TEST(HostBufferStoreTest, WriteAfterReadStarted) {
   HostBufferStore store;
   const uint64_t kHandle = 1;
 
-  auto lookup_promise =
-      Future<std::shared_ptr<const std::string>>::CreatePromise();
-  Future<std::shared_ptr<const std::string>> lookup_fut(lookup_promise);
+  auto [lookup_promise, lookup_fut] =
+      Future<std::shared_ptr<absl::string_view>>::MakePromise();
 
   absl::Notification closure_started;
   tsl::Env::Default()->SchedClosure([&]() {
@@ -75,9 +76,8 @@ TEST(HostBufferStoreTest, ShutdownAfterReadStarted) {
   HostBufferStore store;
   const uint64_t kHandle = 1;
 
-  auto lookup_promise =
-      Future<std::shared_ptr<const std::string>>::CreatePromise();
-  Future<std::shared_ptr<const std::string>> lookup_fut(lookup_promise);
+  auto [lookup_promise, lookup_fut] =
+      Future<std::shared_ptr<absl::string_view>>::MakePromise();
 
   absl::Notification closure_started;
   tsl::Env::Default()->SchedClosure([&]() {

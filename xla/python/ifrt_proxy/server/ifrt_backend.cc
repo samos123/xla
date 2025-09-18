@@ -91,7 +91,7 @@ namespace {
 using IfrtArrayRef = tsl::RCReference<xla::ifrt::Array>;
 
 absl::StatusOr<IfrtArrayRef> MakeStringArrayFromHostBuffer(
-    Client* client, std::shared_ptr<const std::string> host_buffer, DType dtype,
+    Client* client, std::shared_ptr<absl::string_view> host_buffer, DType dtype,
     Shape shape, std::optional<absl::Span<const int64_t>> byte_strides,
     std::shared_ptr<const Sharding> sharding) {
   TF_ASSIGN_OR_RETURN(std::vector<absl::Cord> string_host_buffer,
@@ -139,7 +139,7 @@ ParseMakeArraysFromHostBufferShardsSpecHostBufferProto(
     byte_strides = FromByteStridesProto(host_buffer_proto.byte_strides());
   }
   TF_ASSIGN_OR_RETURN(
-      std::shared_ptr<const std::string> host_buffer,
+      std::shared_ptr<absl::string_view> host_buffer,
       host_buffer_store->Lookup(host_buffer_proto.host_buffer_handle(),
                                 /*timeout=*/absl::InfiniteDuration()));
   const void* data;
@@ -833,7 +833,7 @@ IfrtBackend::HandleMakeArrayFromHostBufferRequest(
     host_buffer_store_->Delete(host_buffer_handle).IgnoreError();
   };
   TF_ASSIGN_OR_RETURN(
-      std::shared_ptr<const std::string> host_buffer,
+      std::shared_ptr<absl::string_view> host_buffer,
       host_buffer_store_->Lookup(host_buffer_handle,
                                  /*timeout=*/absl::InfiniteDuration()));
   std::move(cleanup).Invoke();
@@ -1794,7 +1794,7 @@ IfrtBackend::HandleLoadedHostCallbackReturnRequest(
   absl::Status status;
   if (ret.has_result_host_buffer_handle()) {
     TF_ASSIGN_OR_RETURN(
-        std::shared_ptr<const std::string> buffer,
+        std::shared_ptr<absl::string_view> buffer,
         host_buffer_store_->Lookup(ret.result_host_buffer_handle(),
                                    /*timeout=*/absl::InfiniteDuration()));
     absl::Cleanup cleanup = [&] {

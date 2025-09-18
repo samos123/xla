@@ -48,7 +48,17 @@ enum {
 
   // kMakeArraysFromHostBufferShards adds Client::MakeArraysFromHostBufferShards
   // support.
-  kMakeArraysFromHostBufferShards,
+  kMakeArraysFromHostBufferShards = 14,
+
+  // kSerDesVersioning users IFRT SerDes versioning for IFRT types.
+  kSerDesVersioning = 15,
+
+  // kExecutableDevices adds a devices() method to Executable.
+  kExecutableDevices = 16,
+
+  // Optimize large transfers with the proxy-server and client in the same
+  // machine to by using the file system.
+  kGrpcAllowLargeTransferOptimizationViaSharedDirectory = 17,
 
   // kSentiel is used to derive kCurrent below. Keep this as the last value of
   // the enum.

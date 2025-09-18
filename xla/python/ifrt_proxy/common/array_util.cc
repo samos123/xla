@@ -172,9 +172,9 @@ absl::StatusOr<std::unique_ptr<std::string>> SerializeStringHostBuffer(
 }
 
 absl::StatusOr<std::vector<absl::Cord>> DeserializeStringHostBufferFromString(
-    const std::string& serialized_string_buffer) {
+    absl::string_view serialized_string_buffer) {
   proto::StringArrayContents string_array_proto;
-  if (!string_array_proto.ParseFromString(serialized_string_buffer)) {
+  if (!string_array_proto.ParseFromString(std::string(serialized_string_buffer))) {
     return absl::InvalidArgumentError(
         "Failed to parse serialized string buffer");
   }

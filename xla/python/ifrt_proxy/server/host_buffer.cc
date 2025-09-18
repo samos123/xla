@@ -25,8 +25,12 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
+#include "absl/strings/string_view.h"
 #include "absl/synchronization/mutex.h"
 #include "absl/time/time.h"
+#include "xla/tsl/platform/env.h"
+#include "xla/tsl/platform/errors.h"
+#include "xla/tsl/platform/file_system.h"
 #include "tsl/profiler/lib/traceme.h"
 
 namespace xla {
@@ -39,9 +43,15 @@ absl::Status HostBufferStore::Store(uint64_t handle, std::string data) {
   if (shutdown_msg_.has_value()) {
     return absl::CancelledError(*shutdown_msg_);
   }
-  const bool inserted =
-      buffers_.insert({handle, std::make_shared<std::string>(std::move(data))})
-          .second;
+
+  std::unique_ptr<std::string> contents =
+      std::make_unique<std::string>(std::move(data));
+  auto* ptr = new absl::string_view(*contents);
+  std::shared_ptr<absl::string_view> value = std::shared_ptr<absl::string_view>(
+      ptr,
+      [contents = std::move(contents)](absl::string_view* ptr) { delete ptr; });
+
+  const bool inserted = buffers_.insert({handle, std::move(value)}).second;
   if (!inserted) {
     return absl::AlreadyExistsError(
         absl::StrCat("Host buffer handle ", handle, " already exists"));
@@ -49,12 +59,52 @@ absl::Status HostBufferStore::Store(uint64_t handle, std::string data) {
   return absl::OkStatus();
 }
 
-absl::StatusOr<std::shared_ptr<const std::string>> HostBufferStore::Lookup(
+absl::Status HostBufferStore::StoreViaFile(uint64_t handle,
+                                           std::string file_path) {
+  VLOG(3) << "HostBuffer::StoreViaFilePath " << handle << " " << file_path;
+
+  tsl::profiler::TraceMe traceme("HostBufferStore::StoreViaFile");
+  std::shared_ptr<absl::string_view> value;
+  {
+    std::unique_ptr<tsl::ReadOnlyMemoryRegion> tsl_mmaped;
+    TF_RETURN_IF_ERROR(tsl::Env::Default()->NewReadOnlyMemoryRegionFromFile(
+        file_path, &tsl_mmaped));
+
+    auto view_ptr = new absl::string_view(
+        static_cast<const char*>(tsl_mmaped->data()), tsl_mmaped->length());
+
+    auto deleter = [tsl_mmaped = std::move(tsl_mmaped),
+                    file_path](absl::string_view* ptr) mutable {
+      tsl_mmaped = nullptr;
+      auto status = tsl::Env::Default()->DeleteFile(file_path);
+      if (!status.ok()) {
+        LOG(WARNING) << "Failed to delete file " << file_path << ": " << status;
+      }
+      delete ptr;
+    };
+
+    value = std::shared_ptr<absl::string_view>(view_ptr, std::move(deleter));
+  }
+
+  absl::MutexLock lock(&mu_);
+  if (shutdown_msg_.has_value()) {
+    return absl::CancelledError(*shutdown_msg_);
+  }
+
+  const bool inserted = buffers_.insert({handle, std::move(value)}).second;
+  if (!inserted) {
+    return absl::AlreadyExistsError(
+        absl::StrCat("Host buffer handle ", handle, " already exists"));
+  }
+  return absl::OkStatus();
+}
+
+absl::StatusOr<std::shared_ptr<absl::string_view>> HostBufferStore::Lookup(
     uint64_t handle, absl::Duration timeout) {
   VLOG(3) << "HostBufferStore::Lookup " << handle
           << " start, timeout=" << timeout;
   tsl::profiler::TraceMe traceme("HostBufferStore::Lookup");
-  auto result = [&]() -> absl::StatusOr<std::shared_ptr<const std::string>> {
+  auto result = [&]() -> absl::StatusOr<std::shared_ptr<absl::string_view>> {
     absl::MutexLock lock(&mu_);
     auto cond = [&]() ABSL_SHARED_LOCKS_REQUIRED(mu_) {
       return shutdown_msg_.has_value() || buffers_.contains(handle);

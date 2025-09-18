@@ -16,10 +16,12 @@
 
 #include <atomic>
 #include <cstdint>
+#include <cstdlib>
 #include <memory>
 #include <string>
 #include <utility>
 
+#include "absl/base/no_destructor.h"
 #include "absl/cleanup/cleanup.h"
 #include "absl/log/check.h"
 #include "absl/log/log.h"
@@ -32,15 +34,33 @@
 #include "grpcpp/support/sync_stream.h"
 #include "xla/pjrt/distributed/util.h"
 #include "xla/python/ifrt/attribute_map.h"
+#include "xla/python/ifrt/serdes_version.h"
+#include "xla/python/ifrt_proxy/common/env_utils.h"
 #include "xla/python/ifrt_proxy/common/grpc_ifrt_service.pb.h"
 #include "xla/python/ifrt_proxy/common/proto_util.h"
 #include "xla/python/ifrt_proxy/server/host_buffer.h"
 #include "xla/python/ifrt_proxy/server/version.h"
+#include "tsl/platform/path.h"
 #include "tsl/profiler/lib/traceme.h"
 
 namespace xla {
 namespace ifrt {
 namespace proxy {
+
+// Returns the directory to use as a scratchpad for large-transfer
+// optimizations.
+// TODO(madthanu): Convert this into a configuration option supplied by
+// global_flags.h.
+static std::string LargeTransferOptimizationDirectory() {
+  static absl::NoDestructor<std::string> result(std::string([]() {
+    const char* key = "IFRT_PROXY_LARGE_TRANSFER_OPTIMIZATION_DIRECTORY";
+    if (const char* valptr = std::getenv(key)) {
+      return valptr;
+    }
+    return "";
+  }()));
+  return *result;
+}
 
 ::grpc::Status GrpcServiceImpl::GetVersion(::grpc::ServerContext* context,
                                            const GrpcGetVersionRequest* request,
@@ -246,6 +266,25 @@ namespace proxy {
     return xla::ToGrpcStatus(store.status());
   }
   return xla::ToGrpcStatus((*store)->Delete(request->handle()));
+}
+
+::grpc::Status GrpcServiceImpl::HostBufferStoreViaFile(
+    ::grpc::ServerContext* context,
+    const GrpcHostBufferStoreViaFileRequest* request,
+    GrpcHostBufferStoreViaFileResponse* response) {
+  tsl::profiler::TraceMe traceme("HostBufferStoreViaFile");
+  auto store = GetHostBufferStore(request->metadata().session_id());
+  if (!store.ok()) {
+    return xla::ToGrpcStatus(store.status());
+  }
+  std::string in_path = ProcessedFilePath(
+      tsl::io::JoinPath(LargeTransferOptimizationDirectory(),
+                        absl::StrCat("lt_", request->metadata().handle())));
+  LOG_EVERY_N(INFO, 1) << "Example file path being used for IFRT Proxy "
+                       << "server's HostBufferStoreViaFile: '" << in_path
+                       << "'";
+  return xla::ToGrpcStatus(
+      (*store)->StoreViaFile(request->metadata().handle(), in_path));
 }
 
 bool GrpcServiceImpl::Test_InsertHostBufferStore(

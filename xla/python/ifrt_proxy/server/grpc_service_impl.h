@@ -77,6 +77,11 @@ class GrpcServiceImpl : public grpc::GrpcIfrtService::Service {
       const GrpcHostBufferDeleteRequest* request,
       GrpcHostBufferDeleteResponse* response) override;
 
+  ::grpc::Status HostBufferStoreViaFile(
+      ::grpc::ServerContext* context,
+      const GrpcHostBufferStoreViaFileRequest* request,
+      GrpcHostBufferStoreViaFileResponse* response) override;
+
   // Test-only method that adds a new session in the host buffer store map.
   // Returns false if the session id already exists.
   bool Test_InsertHostBufferStore(
